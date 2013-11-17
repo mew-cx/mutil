@@ -1,0 +1,489 @@
+diff -rupN old5/src/copy.c new/src/copy.c
+--- old5/src/copy.c	2011-08-29 17:46:52.691079157 -0700
++++ new/src/copy.c	2012-10-08 16:05:26.492692109 -0700
+@@ -633,7 +633,7 @@ copy_reg_task (copy_reg_t *crt, struct c
+ // PZK >
+           blcm = co->buffer_size;
+           if (co->read_mode || co->write_mode)
+-            blcm = buffer_lcm (blcm, 512, blcm_max);
++            blcm = buffer_lcm (blcm, 4096, blcm_max);
+ // < PZK
+ 
+           /* Do not bother with a buffer larger than the input file, plus one
+@@ -691,16 +691,15 @@ copy_reg_task (copy_reg_t *crt, struct c
+ 
+       for (;;)
+         {
+-          if (crt->nsplits > 1 &&
+-            n_read_total >= crt->stop_offset - crt->start_offset) break;
++          if (n_read_total >= crt->stop_offset - crt->start_offset) break;
+ 
+           ssize_t n_read;
+           if (raiol[0] != NULL) {
+               // this will be skipped during the first double buffer iteration
+-              aio_suspend(raiol, 1, NULL);
++              aio_suspend((const struct aiocb * const *) raiol, 1, NULL);
+               if (co->print_stats) clock_gettime(CLOCK_REALTIME, &rts[1]);
+               if (waiol[0] != NULL) {
+-                  aio_suspend(waiol, 1, NULL);
++                  aio_suspend((const struct aiocb * const *) waiol, 1, NULL);
+                   if (co->print_stats) {
+                     clock_gettime(CLOCK_REALTIME, &wts[1]);
+                     crt->write_time += (double) (
+@@ -712,10 +711,13 @@ copy_reg_task (copy_reg_t *crt, struct c
+               }
+               n_read = aio_return(raiol[0]);
+           } else {
+-              if (co->read_mode &&
+-                    crt->stop_offset - crt->start_offset - n_read_total < buf_size) {
+-                // turn off direct i/o if going to read last unaligned block
+-                // since it causes problems for some file systems
++              off_t to_read = MIN(buf_size,
++                crt->stop_offset - crt->start_offset - n_read_total);
++              // align offset for direct i/o and better performance when buffered
++              off_t align_read = (crt->start_offset + n_read_total) % 4096;
++              if (align_read != 0 && to_read > 4096) to_read = 4096 - align_read;
++              if (co->read_mode && to_read < buf_size) {
++                // turn off direct i/o if going to read unaligned block
+                 int old_flags = fcntl(crt->source_desc, F_GETFL);
+                 if (fcntl(crt->source_desc, F_SETFL, old_flags & ~O_DIRECT) != 0)
+                     error(0, errno, _("failed to turn off O_DIRECT: %s"),
+@@ -723,10 +725,17 @@ copy_reg_task (copy_reg_t *crt, struct c
+               }
+ 
+               if (co->print_stats) clock_gettime(CLOCK_REALTIME, &rts[0]);
+-              n_read = read (crt->source_desc, buf[aio_buf],
+-                MIN(buf_size, crt->stop_offset - crt->start_offset -
+-                    n_read_total));
++              n_read = read (crt->source_desc, buf[aio_buf], to_read);
+               if (co->print_stats) clock_gettime(CLOCK_REALTIME, &rts[1]);
++
++              if (co->read_mode && align_read != 0) {
++                // turn direct i/o back on in case it was turned off
++                int old_flags = fcntl(crt->source_desc, F_GETFL);
++                if (!(old_flags & O_DIRECT) &&
++                    fcntl(crt->source_desc, F_SETFL, old_flags | O_DIRECT) != 0)
++                        error(0, errno, _("failed to turn on O_DIRECT: %s"),
++                            quote(crt->src_name));
++              }
+           }
+ 
+           if (co->print_stats) {
+@@ -768,11 +777,11 @@ copy_reg_task (copy_reg_t *crt, struct c
+ 
+           n_read_total += n_read;
+ 
+-          if (co->double_buffer) {
+-            if (co->read_mode &&
+-                    crt->stop_offset - crt->start_offset - n_read_total < buf_size) {
+-                // turn off direct i/o if going to read last unaligned block
+-                // since it causes problems for some file systems
++          off_t to_read = MIN(buf_size,
++            crt->stop_offset - crt->start_offset - n_read_total);
++          if (co->double_buffer && to_read > 0) {
++            if (co->read_mode && to_read < buf_size) {
++                // turn off direct i/o if going to read unaligned block
+                 int old_flags = fcntl(crt->source_desc, F_GETFL);
+                 if (fcntl(crt->source_desc, F_SETFL, old_flags & ~O_DIRECT) != 0)
+                     error(0, errno, _("failed to turn off O_DIRECT: %s"),
+@@ -784,8 +793,7 @@ copy_reg_task (copy_reg_t *crt, struct c
+             raio.aio_fildes = crt->source_desc;
+             raio.aio_offset = crt->start_offset + n_read_total;
+             raio.aio_buf = buf[!aio_buf];
+-            raio.aio_nbytes = MIN(buf_size,
+-                crt->stop_offset - crt->start_offset - n_read_total);
++            raio.aio_nbytes = to_read;
+             raiol[0] = &raio;
+             //TODO: error handling for bad aio_read
+             int rc = aio_read(&raio);
+@@ -894,15 +902,15 @@ copy_reg_task (copy_reg_t *crt, struct c
+ #endif
+           if (co->double_buffer) aio_buf = !aio_buf;
+         }
+-        if (waiol[0] != NULL) aio_suspend(waiol, 1, NULL);
++        if (waiol[0] != NULL)
++            aio_suspend((const struct aiocb * const *) waiol, 1, NULL);
+ #ifdef POSIX_FADV_DONTNEED
+         if (co->fadvise_write && n_read_total >= buf_size) {
+-            sync_file_range(crt->dest_desc,
+-                crt->start_offset + n_read_total - buf_size,
+-                buf_size, SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER);
+-            posix_fadvise(crt->dest_desc,
+-                crt->start_offset + n_read_total - buf_size,
+-                buf_size, POSIX_FADV_DONTNEED);
++            sync_file_range(crt->dest_desc, waiol[0]->aio_offset,
++                waiol[0]->aio_nbytes,
++                SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER);
++            posix_fadvise(crt->dest_desc, waiol[0]->aio_offset,
++                waiol[0]->aio_nbytes, POSIX_FADV_DONTNEED);
+         }
+ #endif
+ 
+diff -rupN old5/src/cp.c new/src/cp.c
+--- old5/src/cp.c	2011-09-12 12:56:28.356352666 -0700
++++ new/src/cp.c	2012-10-08 14:55:48.702518511 -0700
+@@ -144,7 +144,7 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
+ 
+ /* The official name of this program (e.g., no `g' prefix).  */
+ // PZK >
+-#define PROGRAM_NAME "mcp 1.76.5"
++#define PROGRAM_NAME "mcp 1.76.6"
+ 
+ #define AUTHORS \
+   proper_name_utf8 ("Torbjorn Granlund", "Torbj\303\266rn Granlund"), \
+@@ -164,6 +164,12 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
+ #ifndef DEFAULT_DOUBLE_BUFFER
+ # define DEFAULT_DOUBLE_BUFFER 0
+ #endif
++#ifndef DEFAULT_FADVISE_READ
++# define DEFAULT_FADVISE_READ 0
++#endif
++#ifndef DEFAULT_FADVISE_WRITE
++# define DEFAULT_FADVISE_WRITE 0
++#endif
+ #if !defined(DEFAULT_HASH_TYPE) && HAVE_LIBGCRYPT
+ # define DEFAULT_HASH_TYPE GCRY_MD_MD5
+ #endif
+@@ -206,6 +212,8 @@ enum
+ #ifdef POSIX_FADV_DONTNEED
+   FADVISE_READ_OPTION,
+   FADVISE_WRITE_OPTION,
++  NO_FADVISE_READ_OPTION,
++  NO_FADVISE_WRITE_OPTION,
+ #endif
+ #ifdef _OPENMP
+   PRINT_STATS_OPTION,
+@@ -288,6 +296,8 @@ static struct option const long_opts[] =
+ #ifdef POSIX_FADV_DONTNEED
+   {"fadvise-read", no_argument, NULL, FADVISE_READ_OPTION},
+   {"fadvise-write", no_argument, NULL, FADVISE_WRITE_OPTION},
++  {"no-fadvise-read", no_argument, NULL, NO_FADVISE_READ_OPTION},
++  {"no-fadvise-write", no_argument, NULL, NO_FADVISE_WRITE_OPTION},
+ #endif
+ #ifdef _OPENMP
+   {"print-stats", no_argument, NULL, PRINT_STATS_OPTION},
+@@ -388,10 +398,16 @@ Copy SOURCE to DEST, or multiple SOURCE(
+ "), stdout);
+ #endif
+ #ifdef POSIX_FADV_DONTNEED
++# if !DEFAULT_FADVISE_READ
+       fputs (_("\
+       --fadvise-read           enable use of posix_fadvise during reads\n\
++"), stdout);
++# endif
++# if !DEFAULT_FADVISE_WRITE
++      fputs (_("\
+       --fadvise-write          enable use of posix_fadvise during writes\n\
+ "), stdout);
++# endif
+ #endif
+ #if HAVE_LIBGCRYPT
+       fprintf (stdout, _("\
+@@ -447,6 +463,18 @@ Copy SOURCE to DEST, or multiple SOURCE(
+       --no-double-buffer       disable use of double buffering during file I/O\n\
+ "), stdout);
+ #endif
++#ifdef POSIX_FADV_DONTNEED
++# if DEFAULT_FADVISE_READ
++      fputs (_("\
++      --no-fadvise-read        disable use of posix_fadvise during reads\n\
++"), stdout);
++# endif
++# if DEFAULT_FADVISE_WRITE
++      fputs (_("\
++      --no-fadvise-write       disable use of posix_fadvise during writes\n\
++"), stdout);
++# endif
++#endif
+       fputs (_("\
+       --offset=POS             copy --length bytes beginning at POS\n\
+                                  (or to end if --length not specified)\n\
+@@ -2145,8 +2173,16 @@ cp_option_init (struct cp_options *x)
+ #else
+   x->double_buffer = false;
+ #endif
++#if DEFAULT_FADVISE_READ
++  x->fadvise_read = true;
++#else
+   x->fadvise_read = false;
++#endif
++#if DEFAULT_FADVISE_WRITE
++  x->fadvise_write = true;
++#else
+   x->fadvise_write = false;
++#endif
+   x->hash_size = 0;
+   x->hash_stat_tasks = xcalloc(1, sizeof(long long));
+ #if HAVE_LIBGCRYPT
+@@ -2373,7 +2409,7 @@ main (int argc, char **argv)
+           x.double_buffer = true;
+           break;
+         case LENGTH_OPTION:
+-          x.length = (int) strtol(optarg, (char **) NULL, 10);
++          x.length = strtoll(optarg, (char **) NULL, 10);
+           if (x.length < 1)
+             error (EXIT_FAILURE, 0, _("invalid length"));
+           break;
+@@ -2387,7 +2423,7 @@ main (int argc, char **argv)
+           x.double_buffer = false;
+           break;
+         case OFFSET_OPTION:
+-          x.offset = (int) strtol(optarg, (char **) NULL, 10);
++          x.offset = strtoll(optarg, (char **) NULL, 10);
+           if (x.offset < 0)
+             error (EXIT_FAILURE, 0, _("invalid offset"));
+           break;
+@@ -2404,13 +2440,19 @@ main (int argc, char **argv)
+         case FADVISE_WRITE_OPTION:
+           x.fadvise_write = true;
+           break;
++        case NO_FADVISE_READ_OPTION:
++          x.fadvise_read = false;
++          break;
++        case NO_FADVISE_WRITE_OPTION:
++          x.fadvise_write = false;
++          break;
+ #endif
+ #ifdef _OPENMP
+         case PRINT_STATS_OPTION:
+           x.print_stats = true;
+           break;
+         case SPLIT_SIZE_OPTION:
+-          x.split_size = (int) strtol(optarg, (char **) NULL, 10);
++          x.split_size = strtoll(optarg, (char **) NULL, 10);
+           if (x.split_size < 0)
+             error (EXIT_FAILURE, 0, _("invalid split size"));
+           if (x.split_size > 0) {
+@@ -2438,7 +2480,7 @@ main (int argc, char **argv)
+           x.check_tree = true;
+           break;
+         case HASH_LEAF_SIZE_OPTION:
+-          x.hash_leaf_size = (int) strtol(optarg, (char **) NULL, 10);
++          x.hash_leaf_size = strtoll(optarg, (char **) NULL, 10);
+           if (x.hash_leaf_size < 1)
+             error (EXIT_FAILURE, 0, _("invalid hash leaf size"));
+           off_t tmp_ls = x.hash_leaf_size;
+@@ -2720,6 +2762,8 @@ main (int argc, char **argv)
+   if (x.read_mode && x.fadvise_read) {
+ #if DEFAULT_DIRECT_READ
+     x.read_mode = 0;
++#elif DEFAULT_FADVISE_READ
++    x.fadvise_read = false;
+ #else
+     error(0, 0, _("note: --fadvise-read disabled in favor of --direct-read"));
+     x.fadvise_read = false;
+@@ -2728,6 +2772,8 @@ main (int argc, char **argv)
+   if (x.write_mode && x.fadvise_write) {
+ #if DEFAULT_DIRECT_WRITE
+     x.write_mode = 0;
++#elif DEFAULT_FADVISE_WRITE
++    x.fadvise_write = false;
+ #else
+     error(0, 0, _("note: --fadvise-write disabled in favor of --direct-write"));
+     x.fadvise_write = false;
+diff -rupN old5/src/md5sum.c new/src/md5sum.c
+--- old5/src/md5sum.c	2011-09-12 12:53:24.419106763 -0700
++++ new/src/md5sum.c	2012-10-08 16:05:38.772661658 -0700
+@@ -138,7 +138,7 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
+ 
+ /* The official name of this program (e.g., no `g' prefix).  */
+ #if HASH_ALGO_MD5
+-# define PROGRAM_NAME "msum 1.76.5"
++# define PROGRAM_NAME "msum 1.76.6"
+ # define DIGEST_TYPE_STRING "MD5"
+ # define DIGEST_STREAM md5_stream
+ # define DIGEST_BITS 128
+@@ -202,6 +202,9 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
+ #ifndef DEFAULT_DOUBLE_BUFFER
+ # define DEFAULT_DOUBLE_BUFFER 0
+ #endif
++#ifndef DEFAULT_FADVISE_READ
++# define DEFAULT_FADVISE_READ 0
++#endif
+ #if !defined(DEFAULT_HASH_TYPE) && HAVE_LIBGCRYPT
+ # define DEFAULT_HASH_TYPE GCRY_MD_MD5
+ #endif
+@@ -256,6 +259,7 @@ enum
+   READ_STDIN_OPTION,
+ #ifdef POSIX_FADV_DONTNEED
+   FADVISE_READ_OPTION,
++  NO_FADVISE_READ_OPTION,
+ #endif
+ #ifdef _OPENMP
+   PRINT_STATS_OPTION,
+@@ -294,6 +298,7 @@ static struct option const long_options[
+   {"read-stdin", no_argument, NULL, READ_STDIN_OPTION},
+ #ifdef POSIX_FADV_DONTNEED
+   {"fadvise-read", no_argument, NULL, FADVISE_READ_OPTION},
++  {"no-fadvise-read", no_argument, NULL, NO_FADVISE_READ_OPTION},
+ #endif
+ #ifdef _OPENMP
+   {"print-stats", no_argument, NULL, PRINT_STATS_OPTION},
+@@ -344,7 +349,11 @@ sum_option_init (struct sum_options *x)
+ #else
+   x->double_buffer = false;
+ #endif
++#if DEFAULT_FADVISE_READ
++  x->fadvise_read = true;
++#else
+   x->fadvise_read = false;
++#endif
+   x->hash_size = 0;
+   x->hash_stat_tasks = xcalloc(1, sizeof(long long));
+ #if HAVE_LIBGCRYPT
+@@ -473,19 +482,21 @@ sum_task(sum_task_t *stt, struct sum_opt
+ 
+   for (;;)
+     {
+-      if (stt->nsplits > 1 &&
+-            n_read_total >= stt->stop_offset - stt->start_offset) break;
++      if (n_read_total >= stt->stop_offset - stt->start_offset) break;
+ 
+       ssize_t n_read;
+       if (aiol[0] != NULL) {
+         // this will be skipped during the first double buffer iteration
+-        aio_suspend(aiol, 1, NULL);
++        aio_suspend((const struct aiocb * const *) aiol, 1, NULL);
+         n_read = aio_return(aiol[0]);
+       } else {
+-        if (so->read_mode &&
+-                stt->stop_offset - stt->start_offset - n_read_total < buf_size) {
+-            // turn off direct i/o if going to read last unaligned block
+-            // since it causes problems for some file systems
++        off_t to_read = MIN(buf_size,
++            stt->stop_offset - stt->start_offset - n_read_total);
++        // align offset for direct i/o and better performance when buffered
++        off_t align_read = (stt->start_offset + n_read_total) % 4096;
++        if (align_read != 0 && to_read > 4096) to_read = 4096 - align_read;
++        if (so->read_mode && to_read < buf_size) {
++            // turn off direct i/o if going to read unaligned block
+             int old_flags = fcntl(source_desc, F_GETFL);
+             if (fcntl(source_desc, F_SETFL, old_flags & ~O_DIRECT) != 0)
+                 error(0, errno, _("failed to turn off O_DIRECT: %s"),
+@@ -493,9 +504,16 @@ sum_task(sum_task_t *stt, struct sum_opt
+         }
+ 
+         if (so->print_stats) clock_gettime(CLOCK_REALTIME, &rts[0]);
+-        n_read = read (source_desc, buf[aio_buf],
+-          MIN(buf_size, stt->stop_offset - stt->start_offset -
+-            n_read_total));
++        n_read = read (source_desc, buf[aio_buf], to_read);
++
++        if (so->read_mode && align_read != 0) {
++            // turn direct i/o back on in case it was turned off
++            int old_flags = fcntl(source_desc, F_GETFL);
++            if (old_flags & O_DIRECT == 0 &&
++                fcntl(source_desc, F_SETFL, old_flags | O_DIRECT) != 0)
++                    error(0, errno, _("failed to turn on O_DIRECT: %s"),
++                        quote(stt->src_name));
++        }
+       }
+ 
+       if (so->print_stats) {
+@@ -528,11 +546,11 @@ sum_task(sum_task_t *stt, struct sum_opt
+ 
+       n_read_total += n_read;
+ 
+-      if (so->double_buffer) {
+-        if (so->read_mode &&
+-                stt->stop_offset - stt->start_offset - n_read_total < buf_size) {
+-            // turn off direct i/o if going to read last unaligned block
+-            // since it causes problems for some file systems
++      off_t to_read = MIN(buf_size,
++        stt->stop_offset - stt->start_offset - n_read_total);
++      if (so->double_buffer && to_read > 0) {
++        if (so->read_mode && to_read < buf_size) {
++            // turn off direct i/o if going to read unaligned block
+             int old_flags = fcntl(source_desc, F_GETFL);
+             if (fcntl(source_desc, F_SETFL, old_flags & ~O_DIRECT) != 0)
+                 error(0, errno, _("failed to turn off O_DIRECT: %s"),
+@@ -544,8 +562,7 @@ sum_task(sum_task_t *stt, struct sum_opt
+         aio.aio_fildes = source_desc;
+         aio.aio_offset = stt->start_offset + n_read_total;
+         aio.aio_buf = buf[!aio_buf];
+-        aio.aio_nbytes = MIN(buf_size,
+-            stt->stop_offset - stt->start_offset - n_read_total);
++        aio.aio_nbytes = to_read;
+         aiol[0] = &aio;
+         //TODO: error handling for bad aio_read
+         aio_read(&aio);
+@@ -749,9 +766,11 @@ With no FILE, or when FILE is -, read st
+ "), stdout);
+ #endif
+ #ifdef POSIX_FADV_DONTNEED
++# if !DEFAULT_FADVISE_READ
+       fputs (_("\
+       --fadvise-read           enable use of posix_fadvise during reads\n\
+ "), stdout);
++# endif
+ #endif
+ #if HAVE_LIBGCRYPT
+       fprintf (stdout, _("\
+@@ -802,6 +821,13 @@ With no FILE, or when FILE is -, read st
+       --no-double-buffer       disable use of double buffering during file I/O\n\
+ "), stdout);
+ #endif
++#ifdef POSIX_FADV_DONTNEED
++# if DEFAULT_FADVISE_READ
++      fputs (_("\
++      --no-fadvise-read        disable use of posix_fadvise during reads\n\
++"), stdout);
++# endif
++#endif
+       fputs (_("\
+       --offset=POS             hash --length bytes beginning at POS\n\
+                                  (or to end if --length not specified)\n\
+@@ -1498,7 +1524,7 @@ main (int argc, char **argv)
+           x.double_buffer = true;
+           break;
+         case LENGTH_OPTION:
+-          x.length = (int) strtol(optarg, (char **) NULL, 10);
++          x.length = strtoll(optarg, (char **) NULL, 10);
+           if (x.length < 1)
+             error (EXIT_FAILURE, 0, _("invalid length"));
+           break;
+@@ -1509,7 +1535,7 @@ main (int argc, char **argv)
+           x.double_buffer = false;
+           break;
+         case OFFSET_OPTION:
+-          x.offset = (int) strtol(optarg, (char **) NULL, 10);
++          x.offset = strtoll(optarg, (char **) NULL, 10);
+           if (x.offset < 0)
+             error (EXIT_FAILURE, 0, _("invalid offset"));
+           break;
+@@ -1520,13 +1546,16 @@ main (int argc, char **argv)
+         case FADVISE_READ_OPTION:
+           x.fadvise_read = true;
+           break;
++        case NO_FADVISE_READ_OPTION:
++          x.fadvise_read = false;
++          break;
+ #endif
+ #ifdef _OPENMP
+         case PRINT_STATS_OPTION:
+           x.print_stats = true;
+           break;
+         case SPLIT_SIZE_OPTION:
+-          x.split_size = (int) strtol(optarg, (char **) NULL, 10);
++          x.split_size = strtoll(optarg, (char **) NULL, 10);
+           if (x.split_size < 0)
+             error (EXIT_FAILURE, 0, _("invalid split size"));
+           if (x.split_size > 0) {
+@@ -1549,7 +1578,7 @@ main (int argc, char **argv)
+           x.check_tree = true;
+           break;
+         case HASH_LEAF_SIZE_OPTION:
+-          x.hash_leaf_size = (int) strtol(optarg, (char **) NULL, 10);
++          x.hash_leaf_size = strtoll(optarg, (char **) NULL, 10);
+           if (x.hash_leaf_size < 1)
+             error (EXIT_FAILURE, 0, _("invalid hash leaf size"));
+           off_t tmp_ls = x.hash_leaf_size;
+@@ -1674,6 +1703,8 @@ main (int argc, char **argv)
+   if (x.read_mode && x.fadvise_read) {
+ #if DEFAULT_DIRECT_READ
+     x.read_mode = 0;
++#elif DEFAULT_FADVISE_READ
++    x.fadvise_read = false;
+ #else
+     error(0, 0, _("Note: --fadvise-read disabled in favor of --direct-read"));
+     x.fadvise_read = false;

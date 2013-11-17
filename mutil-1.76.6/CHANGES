@@ -1,0 +1,47 @@
+CHANGES
+=======
+
+* Mutil 1.76.1 (10/27/10)
+    - First public release
+
+* Mutil 1.76.2 (01/04/11)
+    - Removed Makefile that was used to create distribution
+    - Added patch to upgrade from previous version
+    - Added deallocation code for semaphores and queues
+    - Fixed high memory utilization when using hash trees
+    - Removed MPI thread limitation that prevented memory overruns
+      since problem was caused by old hash tree code
+
+* Mutil 1.76.3 (08/25/11)
+    - Added note about need for static version of libgpg-error
+    - Hash of stdin (i.e. piped input and file name "-") now works in msum
+    - Hash output format of mcp now exactly matches msum
+    - Added --check-tree option to isolate corruption
+    - Added --offset and --length options to copy/sum a specific file subset
+    - Added file restriping to mcp based on file size for Lustre targets
+    - Added --print-stripe to mcp to print striping changes to stderr
+    - Fixed divide by 0 when hash leaf size is 0 due to default split size
+    - Changed hash output so non-standard output is reported in comments
+    - Now adjust split size to buffer size when 0 < split size < buffer size
+    - Fixed making of holes in mcp in double buffer case
+    - Split --fadvise into --fadvise-read and --fadvise-write
+    - Added --skip-chmod to mcp to retain temporary permissions used during copy
+    - Fixed --direct-read errors on some file systems due to last unaligned read
+
+* Mutil 1.76.4 (09/01/11)
+    - Fixed race condition between last unaligned read and disabling direct I/O
+      when --direct-read and --double-buffer enabled
+
+* Mutil 1.76.5 (09/12/11)
+    - Fixed references to fadvise/--fadvise instead of
+      fadvise_read/--fadvise-read (bug report by W. Kettler)
+    - Fixed error messages referencing --read_stdin instead of --read-stdin
+
+* Mutil 1.76.6 (10/15/12)
+    - Fixed various compiler warnings
+    - Fixed last zero-length read when --double-buffer enabled
+    - Fixed improper off_t parsing of various options
+    - Fixed offset of last posix_fadvise on write buffer
+    - Fixed unaligned file offsets during --direct-read
+    - Fixed alignment multiple, which must be higher than open man page states
+    - Added ability to set posix_fadvise as default in reads and/or writes
